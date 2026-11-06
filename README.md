@@ -72,6 +72,14 @@ process uses SSH port 22, set `SSH_PORT` in `.env` to a free external port.
 `HTTP_PORT` changes the loopback-only port Caddy proxies to; update the Caddyfile
 to match.
 
+## Fedora and SELinux
+
+Compose bind mounts use SELinux relabel options: shared `:z` labels for the
+application config and PGP directory, and private `:Z` labels for files mounted
+into one service. This lets PostgreSQL read its initialization script on Fedora
+without disabling SELinux or running `chcon` manually. After updating, run
+`docker compose up -d` so Compose recreates containers with the new labels.
+
 ## Operations
 
 Check service logs and status with:
