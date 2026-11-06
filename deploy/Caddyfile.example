@@ -1,0 +1,16 @@
+{
+    email admin@example.org
+}
+
+example.org, meta.example.org, git.example.org, hg.example.org, todo.example.org, man.example.org, paste.example.org, pages.example.org, hub.example.org {
+    reverse_proxy 127.0.0.1:8080
+}
+
+# Pages serves arbitrary user sites below *.sites.example.org. A wildcard
+# certificate requires the DNS challenge module for your DNS provider.
+*.sites.example.org {
+    tls {
+        dns cloudflare {env.CF_API_TOKEN}
+    }
+    reverse_proxy 127.0.0.1:8080
+}

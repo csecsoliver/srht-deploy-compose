@@ -111,6 +111,10 @@ def main() -> None:
     if not domain or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", domain):
         raise SystemExit("Usage: scripts/bootstrap.py <base-domain> (use a real public domain for production)")
 
+    http_port = values.get("HTTP_PORT", "8080")
+    if http_port == "80":
+        http_port = "8080"  # Migrate the previous public-HTTP default to the Caddy backend port.
+
     values.update({
         "DOMAIN": domain.lower(),
         "SITE_NAME": values.get("SITE_NAME", "SourceHut"),
@@ -124,8 +128,7 @@ def main() -> None:
         "SMTP_FROM": values.get("SMTP_FROM", f"sourcehut@{domain}"),
         "SMTP_ENCRYPTION": values.get("SMTP_ENCRYPTION", "starttls"),
         "SMTP_AUTH": values.get("SMTP_AUTH", "none"),
-        "HTTP_PORT": values.get("HTTP_PORT", "80"),
-        "HTTPS_PORT": values.get("HTTPS_PORT", "443"),
+        "HTTP_PORT": http_port,
         "SSH_PORT": values.get("SSH_PORT", "22"),
         "POSTGRES_PASSWORD": values.get("POSTGRES_PASSWORD", secrets.token_hex(32)),
         "REDICT_PASSWORD": values.get("REDICT_PASSWORD", secrets.token_hex(32)),
@@ -156,30 +159,7 @@ def main() -> None:
     render(ROOT / "config.ini.template", ROOT / "config.ini", values, 0o600)
     render(ROOT / "config.ssh.ini.template", ROOT / "config.ssh.ini", values, 0o600)
     render(ROOT / "deploy/nginx.conf.template", ROOT / "deploy/nginx.conf", values, 0o644)
-    cert_dir = ROOT / "certs"
-    cert_dir.mkdir(exist_ok=True)
-    cert = cert_dir / "fullchain.pem"
-    key = cert_dir / "privkey.pem"
-    if not cert.exists() or not key.exists():
-        san_names = [
-            domain,
-            *[f"{service}.{domain}" for service in ("meta", "git", "hg", "todo", "man", "paste", "pages", "hub")],
-            f"*.sites.{domain}",
-        ]
-        san = ",".join(f"DNS:{name}" for name in san_names)
-        subprocess.run(
-            [
-                "openssl", "req", "-x509", "-nodes", "-days", "30", "-newkey", "rsa:3072",
-                "-keyout", str(key), "-out", str(cert), "-subj", f"/CN=meta.{domain}",
-                "-addext", f"subjectAltName={san}",
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        key.chmod(0o600)
-
-    print("Runtime config generated. The initial TLS certificate is self-signed; install a trusted certificate before public use.")
+    print("Runtime config generated. Caddy should terminate public HTTPS and proxy to the local Nginx port.")
     print("SMTP is configured for an external STARTTLS relay; set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, and SMTP_AUTH in .env.")
     print(f"Admin account: {values['ADMIN_USER']} (initial password is stored in .env)")
 

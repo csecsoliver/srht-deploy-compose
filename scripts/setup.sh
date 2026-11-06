@@ -6,7 +6,7 @@ if [ "$#" -ne 1 ]; then
     exit 2
 fi
 domain=$1
-for tool in docker python3 gpg openssl; do
+for tool in docker python3 gpg; do
     command -v "$tool" >/dev/null 2>&1 || { echo "Required command not found: $tool" >&2; exit 1; }
 done
 docker compose version >/dev/null 2>&1 || { echo "Docker Compose v2 is required." >&2; exit 1; }
@@ -20,7 +20,7 @@ python3 scripts/create-admin.py
 cat <<EOF2
 
 Initial deployment is running for $domain.
-Before public use, install a trusted TLS certificate and configure a real SMTP
-relay in .env, then run: docker compose up -d
-See README.md for DNS, backup, upgrade, SMTP, and maintenance instructions.
+Configure Caddy to proxy HTTPS requests to the loopback port in .env (8080
+by default) before public use, and configure a real SMTP relay in .env.
+See README.md for the Caddy example and operations instructions.
 EOF2

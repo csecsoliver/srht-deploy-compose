@@ -8,9 +8,9 @@ man, paste, pages, and hub. Mailing lists and builds are not deployed. Incoming
 email is disabled; outgoing email uses an external SMTP relay that you provide.
 
 The stack includes PostgreSQL, Redict, Silo for S3-compatible object storage,
-OpenSSH, and an Nginx TLS reverse proxy. Persistent data is stored in Docker
-volumes. This is a single-host deployment; production DNS and trusted TLS are
-required before exposing it publicly.
+OpenSSH, and Nginx for application routing. Caddy runs on the host and owns
+public HTTPS; Nginx is reachable only through `127.0.0.1:8080`. Persistent data
+is stored in Docker volumes.
 
 ## First deployment
 
@@ -30,20 +30,26 @@ hub.srht.example.org
 *.sites.srht.example.org
 ```
 
-The `*.sites` wildcard serves user Pages sites. Allow inbound TCP ports 80,
-443, and 22 (or the custom ports configured below). Generate the private
+The `*.sites` wildcard serves user Pages sites. Caddy should listen publicly on
+ports 80 and 443; SourceHut SSH uses port 22 by default. Generate the private
 runtime configuration and start the stack in one step:
 
 ```sh
 scripts/setup.sh srht.example.org
 ```
 
-This creates `.env`, `config.ini`, a PGP signing key, the Nginx configuration,
-and a temporary self-signed TLS certificate, then builds the stack and creates
-an admin account. These files contain secrets and
-are excluded from Git. Install a trusted certificate covering the base domain,
-all service subdomains, and `*.sites.srht.example.org` as
-`certs/fullchain.pem` and `certs/privkey.pem` before public use.
+This creates `.env`, `config.ini`, a PGP signing key, and the Nginx
+configuration, then builds the stack and creates an admin account. These files
+contain secrets and are excluded from Git. Nginx binds only to the loopback
+interface on port 8080; it does not terminate TLS or publish a public web port.
+
+Configure Caddy to reverse proxy the SourceHut hostnames to
+`127.0.0.1:8080`. Start from [`deploy/Caddyfile.example`](deploy/Caddyfile.example)
+and replace `example.org` with the base domain. The Pages wildcard host
+`*.sites.<domain>` requires Caddy's DNS challenge module for your DNS provider;
+the example shows Cloudflare. Caddy must pass the original Host and
+`X-Forwarded-Proto` headers (Caddy's `reverse_proxy` does this by default).
+Keep Caddy's certificate storage persistent. Then reload Caddy.
 
 Edit `.env` and set the SMTP relay values supplied by your provider:
 `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_AUTH`,
@@ -57,14 +63,14 @@ and start the services:
 python3 scripts/bootstrap.py
 docker compose config --quiet
 docker compose up -d --build
-python3 scripts/create-admin.py
 docker compose ps
 ```
 
 The admin password is held in `.env`; retrieve it locally and change it after
-first login. Do not commit or share `.env`, `config.ini`, `pgp/`, or `certs/`.
-If ports 80, 443, or 22 are already in use, set `HTTP_PORT`, `HTTPS_PORT`, or
-`SSH_PORT` in `.env` before starting the stack.
+first login. Do not commit or share `.env`, `config.ini`, or `pgp/`. If another
+process uses SSH port 22, set `SSH_PORT` in `.env` to a free external port.
+`HTTP_PORT` changes the loopback-only port Caddy proxies to; update the Caddyfile
+to match.
 
 ## Operations
 
@@ -75,15 +81,18 @@ docker compose ps
 docker compose logs -f
 ```
 
-After changing SMTP settings, TLS files, or other rendered settings, rerun
+After changing SMTP settings or other rendered settings, rerun
 `python3 scripts/bootstrap.py` when applicable, then recreate the affected
-services with `docker compose up -d`. The Compose migration job initializes
+services with `docker compose up -d`. The initial setup script has already created
+the admin account; use `python3 scripts/create-admin.py` only if you need to
+create or reset it later. The Compose migration job initializes
 empty databases and applies pending migrations on subsequent deployments.
 
 Back up PostgreSQL and all persistent data regularly. At minimum, retain the
 PostgreSQL dump, Silo object data, git and Mercurial repository volumes, Pages
-certificate volume, SSH host keys, `.env`, `config.ini`, PGP keys, and TLS
-certificate. Keep backups encrypted and test restoring them. Do not use
+certificate volume, SSH host keys, `.env`, `config.ini`, and PGP keys. Back up
+Caddy's certificate storage with the host. Keep backups encrypted and test
+restoring them. Do not use
 `docker compose down -v` for routine maintenance; it deletes the data volumes.
 
 For upgrades, review the SourceHut release notes and package changes, take a
@@ -96,5 +105,4 @@ docker compose ps
 ```
 
 Configure the host kernel with `vm.overcommit_memory=1` for Redict persistence,
-and monitor disk space, PostgreSQL, Silo, and the Docker host. SMTP delivery
-cannot work until valid external relay settings are supplied.
+and monitor disk space, PostgreSQL, Silo, and the Docker host. SMTP delivery cannot work until valid external relay settings are supplied.
