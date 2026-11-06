@@ -1,7 +1,31 @@
+# Runtime settings and generated configuration contain credentials.
+/.env
+/config.ini
+/config.ssh.ini
+/deploy/nginx.conf
+/certs/*
+/pgp/*
+
+# Cloned SourceHut repositories used for reference or upstream updates.
 /core.sr.ht/
 /meta.sr.ht/
 /todo.sr.ht/
 /scm.sr.ht/
 /git.sr.ht/
+/hg.sr.ht/
+/hg-upstream/
+/builds.sr.ht/
+/lists.sr.ht/
+/pages.sr.ht/
+/hub.sr.ht/
 /man.sr.ht/
 /paste.sr.ht/
+/sr.ht-nginx/
+
+# Local build/runtime output.
+/data/
+/backups/
+
+# Python validation/runtime artifacts.
+__pycache__/
+*.py[cod]

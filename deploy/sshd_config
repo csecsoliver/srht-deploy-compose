@@ -1,0 +1,24 @@
+Port 22
+AddressFamily any
+ListenAddress 0.0.0.0
+HostKey /var/lib/sourcehut/ssh/ssh_host_rsa_key
+HostKey /var/lib/sourcehut/ssh/ssh_host_ed25519_key
+
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+AuthorizedKeysCommand /usr/bin/sourcehut-ssh "%u" "%h" "%t" "%k"
+AuthorizedKeysCommandUser root
+PermitUserEnvironment SRHT_*
+AllowUsers git hg
+
+AllowAgentForwarding no
+AllowTcpForwarding no
+GatewayPorts no
+PermitTunnel no
+X11Forwarding no
+PermitTTY no
+UseDNS no
+PrintMotd no
+LogLevel VERBOSE

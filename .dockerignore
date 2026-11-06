@@ -1,9 +1,4 @@
-.git/
-core.sr.ht/.git/
-core.sr.ht/srht/scss/bootstrap/.git/
-meta.sr.ht/.git/
-todo.sr.ht/.git/
-scm.sr.ht/.git/
-git.sr.ht/.git/
-man.sr.ht/.git/
-paste.sr.ht/.git/
+**
+!Dockerfile
+!deploy
+!deploy/**

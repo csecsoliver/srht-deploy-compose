@@ -1,268 +1,657 @@
-x-srht-service: &srht-service
-  configs:
-    - source: main
-      target: /etc/sr.ht/config.ini
-    - source: pgp-pubkey
-      target: /etc/sr.ht/pgp/pubkey.asc
-    - source: pgp-privkey
-      target: /etc/sr.ht/pgp/privkey.asc
+name: sourcehut
 
-name: srht
+x-srht-app: &srht-app
+  image: sourcehut/platform:local
+  build:
+    context: .
+    dockerfile: Dockerfile
+    target: platform
+  init: true
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  cap_add:
+    - CHOWN
+    - DAC_OVERRIDE
+    - FOWNER
+    - SETGID
+    - SETUID
+  environment:
+    SRHT_USER: root
+  volumes:
+    - ./config.ini:/run/secrets/config.ini:ro
+    - ./pgp:/run/secrets/pgp:ro
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redict:
+      condition: service_healthy
+    silo-init:
+      condition: service_completed_successfully
+    migrate:
+      condition: service_completed_successfully
 
-configs:
-  main:
-    file: config.ini
-  pgp-pubkey:
-    file: pgp/pubkey.asc
-  pgp-privkey:
-    file: pgp/privkey.asc
-  git-sshd:
-    file: git-sshd/sshd_config
-  git-sshd-rsa-pubkey:
-    file: git-sshd/ssh_host_rsa_key.pub
-  git-sshd-rsa-privkey:
-    file: git-sshd/ssh_host_rsa_key
-  git-sshd-ed25519-pubkey:
-    file: git-sshd/ssh_host_ed25519_key.pub
-  git-sshd-ed25519-privkey:
-    file: git-sshd/ssh_host_ed25519_key
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: srht_admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run scripts/bootstrap.py first}
+      POSTGRES_DB: postgres
+      DB_META_PASSWORD: ${DB_META_PASSWORD:?Run scripts/bootstrap.py first}
+      DB_GIT_PASSWORD: ${DB_GIT_PASSWORD:?Run scripts/bootstrap.py first}
+      DB_HG_PASSWORD: ${DB_HG_PASSWORD:?Run scripts/bootstrap.py first}
+      DB_TODO_PASSWORD: ${DB_TODO_PASSWORD:?Run scripts/bootstrap.py first}
+      DB_MAN_PASSWORD: ${DB_MAN_PASSWORD:?Run scripts/bootstrap.py first}
+      DB_PASTE_PASSWORD: ${DB_PASTE_PASSWORD:?Run scripts/bootstrap.py first}
+      DB_PAGES_PASSWORD: ${DB_PAGES_PASSWORD:?Run scripts/bootstrap.py first}
+      DB_HUB_PASSWORD: ${DB_HUB_PASSWORD:?Run scripts/bootstrap.py first}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./deploy/init-postgres.sh:/docker-entrypoint-initdb.d/10-sourcehut.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U srht_admin -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    stop_grace_period: 1m
+
+  redict:
+    image: registry.redict.io/redict:7.3.6
+    restart: unless-stopped
+    environment:
+      REDICT_PASSWORD: ${REDICT_PASSWORD:?Run scripts/bootstrap.py first}
+    command:
+      - /bin/redict-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDICT_PASSWORD:?Run scripts/bootstrap.py first}
+      - --maxmemory-policy
+      - noeviction
+    volumes:
+      - redict-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(REDICTCLI_AUTH=$$REDICT_PASSWORD /bin/redict-cli ping)\" = PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  silo:
+    image: pgsty/silo:RELEASE.2026-10-26T00-00-00Z
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:?Run scripts/bootstrap.py first}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:?Run scripts/bootstrap.py first}
+    volumes:
+      - silo-data:/data
+    command: ["server", "/data", "--console-address", ":9001"]
+
+  silo-init:
+    image: pgsty/mc:RELEASE.2026-10-26T00-00-00Z
+    restart: "no"
+    entrypoint: ["/bin/sh", "-ec"]
+    environment:
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?Run scripts/bootstrap.py first}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?Run scripts/bootstrap.py first}
+    depends_on:
+      - silo
+    command:
+      - |
+        for attempt in $$(seq 1 60); do
+          if mc alias set local http://silo:9000 "$$S3_ACCESS_KEY" "$$S3_SECRET_KEY" >/dev/null 2>&1 && mc ready local; then
+            mc mb --ignore-existing local/sourcehut
+            exit 0
+          fi
+          sleep 2
+        done
+        echo 'S3 storage did not become ready' >&2
+        exit 1
+
+  migrate:
+    <<: *srht-app
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        for service in meta.sr.ht git.sr.ht hg.sr.ht todo.sr.ht man.sr.ht paste.sr.ht pages.sr.ht hub.sr.ht; do
+          echo "Migrating $$service"
+          dsn=$$(awk -v section="$$service" '$$0 == "[" section "]" { in_section = 1; next } /^\[/ { in_section = 0 } in_section && /^connection-string=/ { sub(/^[^=]*=/, ""); print; exit }' /etc/sr.ht/config.ini)
+          initialized=$$(psql "$$dsn" -Atqc "SELECT to_regclass('public.brant_db_version') IS NOT NULL")
+          if [ "$$initialized" = t ]; then
+            sourcehut-migrate "$$service" up
+          else
+            sourcehut-migrate "$$service" init
+            sourcehut-migrate "$$service" up
+          fi
+        done
+
+  volume-init:
+    <<: *srht-app
+    restart: "no"
+    depends_on: []
+    volumes:
+      - ./config.ini:/run/secrets/config.ini:ro
+      - ./pgp:/run/secrets/pgp:ro
+      - git-repos:/var/lib/git
+      - hg-repos:/var/lib/mercurial
+      - pages-certs:/var/lib/pages/certs
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        chown -R git:git /var/lib/git
+        chown -R hg:hg /var/lib/mercurial
+        chown -R pages:pages /var/lib/pages/certs
+
+  meta-api:
+    <<: *srht-app
+    environment:
+      SRHT_USER: meta
+    command: ["/usr/bin/meta.sr.ht-api", "-b", "0.0.0.0:5100"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck", "5100"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+
+  meta:
+    <<: *srht-app
+    environment:
+      SRHT_USER: meta
+    command:
+      - gunicorn
+      - metasrht.app:app
+      - --bind
+      - 0.0.0.0:5000
+      - --config
+      - /etc/sr.ht/meta.sr.ht.gunicorn.conf.py
+      - --access-logfile
+      - "-"
+      - --error-logfile
+      - "-"
+    depends_on:
+      meta-api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redict:
+        condition: service_healthy
+      silo-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck", "5000"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+
+  meta-webhooks:
+    <<: *srht-app
+    environment:
+      SRHT_USER: meta
+    command: ["celery", "-A", "metasrht.webhooks", "worker", "--loglevel=INFO", "--concurrency=2"]
+
+  git-api:
+    <<: *srht-app
+    environment:
+      SRHT_USER: git
+    volumes:
+      - ./config.ini:/run/secrets/config.ini:ro
+      - ./pgp:/run/secrets/pgp:ro
+      - git-repos:/var/lib/git
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redict:
+        condition: service_healthy
+      silo-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+    command: ["/usr/bin/git.sr.ht-api", "-b", "0.0.0.0:5101"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck", "5101"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+
+  git:
+    <<: *srht-app
+    environment:
+      SRHT_USER: git
+    volumes:
+      - ./config.ini:/run/secrets/config.ini:ro
+      - ./pgp:/run/secrets/pgp:ro
+      - git-repos:/var/lib/git
+    depends_on:
+      git-api:
+        condition: service_healthy
+      volume-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redict:
+        condition: service_healthy
+      silo-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+    command:
+      - gunicorn
+      - gitsrht.app:app
+      - --bind
+      - 0.0.0.0:5001
+      - --config
+      - /etc/sr.ht/git.sr.ht.gunicorn.conf.py
+      - --access-logfile
+      - "-"
+      - --error-logfile
+      - "-"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck", "5001"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+
+  git-http:
+    <<: *srht-app
+    environment:
+      SRHT_USER: git
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./config.ini:/run/secrets/config.ini:ro
+      - ./pgp:/run/secrets/pgp:ro
+      - git-repos:/var/lib/git:ro
+    command: ["spawn-fcgi", "-n", "-a", "0.0.0.0", "-p", "9000", "--", "/usr/bin/fcgiwrap"]
+
+  hg-api:
+    <<: *srht-app
+    environment:
+      SRHT_USER: hg
+    volumes:
+      - ./config.ini:/run/secrets/config.ini:ro
+      - ./pgp:/run/secrets/pgp:ro
+      - hg-repos:/var/lib/mercurial
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redict:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: ["/usr/bin/hg.sr.ht-api", "-b", "0.0.0.0:5110"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck", "5110"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+
+  hg:
+    <<: *srht-app
+    environment:
+      SRHT_USER: hg
+    volumes:
+      - ./config.ini:/run/secrets/config.ini:ro
+      - ./pgp:/run/secrets/pgp:ro
+      - hg-repos:/var/lib/mercurial
+    depends_on:
+      hg-api:
+        condition: service_healthy
+      volume-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redict:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command:
+      - gunicorn
+      - hgsrht.app:app
+      - --bind
+      - 0.0.0.0:5010
+      - --config
+      - /etc/sr.ht/hg.sr.ht.gunicorn.conf.py
+      - --access-logfile
+      - "-"
+      - --error-logfile
+      - "-"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck", "5010"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+
+  todo-api:
+    <<: *srht-app
+    environment:
+      SRHT_USER: todo
+    command: ["/usr/bin/todo.sr.ht-api", "-b", "0.0.0.0:5103"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck", "5103"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+
+  todo:
+    <<: *srht-app
+    environment:
+      SRHT_USER: todo
+    command:
+      - gunicorn
+      - todosrht.app:app
+      - --bind
+      - 0.0.0.0:5003
+      - --config
+      - /etc/sr.ht/todo.sr.ht.gunicorn.conf.py
+      - --access-logfile
+      - "-"
+      - --error-logfile
+      - "-"
+    depends_on:
+      todo-api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redict:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck", "5003"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+
+  man-api:
+    <<: *srht-app
+    environment:
+      SRHT_USER: man
+    command: ["/usr/bin/man.sr.ht-api", "-b", "0.0.0.0:5104"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck", "5104"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+
+  man:
+    <<: *srht-app
+    environment:
+      SRHT_USER: man
+    command:
+      - gunicorn
+      - mansrht.app:app
+      - --bind
+      - 0.0.0.0:5004
+      - --config
+      - /etc/sr.ht/man.sr.ht.gunicorn.conf.py
+      - --access-logfile
+      - "-"
+      - --error-logfile
+      - "-"
+    depends_on:
+      man-api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redict:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck", "5004"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+
+  paste-api:
+    <<: *srht-app
+    environment:
+      SRHT_USER: paste
+    command: ["/usr/bin/paste.sr.ht-api", "-b", "0.0.0.0:5111"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck", "5111"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+
+  paste:
+    <<: *srht-app
+    environment:
+      SRHT_USER: paste
+    command:
+      - gunicorn
+      - pastesrht.app:app
+      - --bind
+      - 0.0.0.0:5011
+      - --config
+      - /etc/sr.ht/paste.sr.ht.gunicorn.conf.py
+      - --access-logfile
+      - "-"
+      - --error-logfile
+      - "-"
+    depends_on:
+      paste-api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redict:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck", "5011"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+
+  pages:
+    <<: *srht-app
+    environment:
+      SRHT_USER: pages
+    volumes:
+      - ./config.ini:/run/secrets/config.ini:ro
+      - ./pgp:/run/secrets/pgp:ro
+      - pages-certs:/var/lib/pages/certs
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redict:
+        condition: service_healthy
+      silo-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+    command: ["/usr/bin/pages.sr.ht", "-b", "0.0.0.0:5112"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck", "5112"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+
+  hub:
+    <<: *srht-app
+    environment:
+      SRHT_USER: hub
+    command:
+      - gunicorn
+      - hubsrht.app:app
+      - --bind
+      - 0.0.0.0:5014
+      - --config
+      - /etc/sr.ht/hub.sr.ht.gunicorn.conf.py
+      - --access-logfile
+      - "-"
+      - --error-logfile
+      - "-"
+    depends_on:
+      hub-api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redict:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck", "5014"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+
+  hub-api:
+    <<: *srht-app
+    environment:
+      SRHT_USER: hub
+    command: ["/usr/bin/hub.sr.ht-api", "-b", "0.0.0.0:5114"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck", "5114"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+
+  ssh:
+    <<: *srht-app
+    environment:
+      SRHT_USER: root
+      SRHT_CONFIG_GROUP: srht-shell
+    restart: unless-stopped
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+      - NET_BIND_SERVICE
+      - SYS_CHROOT
+      - AUDIT_WRITE
+    ports:
+      - "${SSH_PORT:-22}:22"
+    volumes:
+      - ./config.ssh.ini:/run/secrets/config.ini:ro
+      - ./pgp:/run/secrets/pgp:ro
+      - git-repos:/var/lib/git
+      - hg-repos:/var/lib/mercurial
+      - ssh-hostkeys:/var/lib/sourcehut/ssh
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redict:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        mkdir -p /run/sshd /var/lib/sourcehut/ssh /var/log/hg.sr.ht
+        chown hg:hg /var/log/hg.sr.ht
+        sed -i '/^hg:/s#/sbin/nologin$#/bin/sh#' /etc/passwd
+        for key in rsa ed25519; do
+          if [ ! -s "/var/lib/sourcehut/ssh/ssh_host_$${key}_key" ]; then
+            ssh-keygen -q -t "$$key" -N '' -f "/var/lib/sourcehut/ssh/ssh_host_$${key}_key"
+          fi
+        done
+        passwd -u git >/dev/null 2>&1 || true
+        passwd -u hg >/dev/null 2>&1 || true
+        exec /usr/sbin/sshd -D -e -f /etc/ssh/sshd_config
+
+  scheduler:
+    <<: *srht-app
+    environment:
+      SRHT_USER: root
+      SRHT_CONFIG_MODE: "0444"
+    volumes:
+      - ./config.ini:/run/secrets/config.ini:ro
+      - git-repos:/var/lib/git
+      - hg-repos:/var/lib/mercurial
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+    command: ["/usr/sbin/crond", "-f", "-d", "8"]
+
+  nginx:
+    image: nginx:1.29-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./deploy/proxy_params:/etc/nginx/proxy_params:ro
+      - ./certs:/etc/nginx/certs:ro
+      - git-repos:/var/lib/git:ro
+      - hg-repos:/var/lib/mercurial:ro
+    depends_on:
+      meta:
+        condition: service_healthy
+      git:
+        condition: service_healthy
+      hg:
+        condition: service_healthy
+      todo:
+        condition: service_healthy
+      man:
+        condition: service_healthy
+      paste:
+        condition: service_healthy
+      pages:
+        condition: service_healthy
+      hub:
+        condition: service_healthy
+      git-http:
+        condition: service_started
+
+  mailpit:
+    image: axllent/mailpit:v1.27.8
+    profiles: [dev-mail]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8025:8025"
 
 volumes:
   postgres-data:
-  minio-data:
+  redict-data:
+  silo-data:
   git-repos:
-
-services:
-  redis:
-    image: "redis:7.2.4-alpine"
-  postgres:
-    image: "postgres:alpine"
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    volumes:
-      - "postgres-data:/var/lib/postgresql/data"
-      - "./init-postgres.sh:/docker-entrypoint-initdb.d/init.sh"
-      - "./meta.sr.ht/schema.sql:/data/meta.sr.ht.sql"
-      - "./todo.sr.ht/schema.sql:/data/todo.sr.ht.sql"
-      - "./git.sr.ht/schema.sql:/data/git.sr.ht.sql"
-      - "./man.sr.ht/schema.sql:/data/man.sr.ht.sql"
-      - "./paste.sr.ht/schema.sql:/data/paste.sr.ht.sql"
-  minio:
-    image: "quay.io/minio/minio"
-    environment:
-      MINIO_ROOT_USER: minio
-      MINIO_ROOT_PASSWORD: jIPk1RZ8gdhQwnUL4YtrOAXsFpHvb4Mw8hEwfLq
-    volumes:
-      - "minio-data:/data"
-    ports:
-      - "127.0.0.1:9001:9001"
-    command: server --console-address ":9001" /data
-  meta-api:
-    <<: *srht-service
-    build:
-      target: srht-meta
-    develop:
-      watch:
-        - path: meta.sr.ht/api
-          action: rebuild
-    depends_on:
-      - redis
-      - postgres
-    ports:
-      - "127.0.0.1:5100:5100"
-    command: /src/meta.sr.ht/api/api
-  meta:
-    <<: *srht-service
-    build:
-      target: srht-meta
-    develop:
-      watch:
-        - path: meta.sr.ht/metasrht
-          action: sync
-          target: /src/meta.sr.ht/metasrht
-    depends_on:
-      - redis
-      - postgres
-      - meta-api
-    ports:
-      - "127.0.0.1:5000:5000"
-    command: flask --app metasrht.app:app --debug run --host=0.0.0.0 --port=5000
-  todo-api:
-    <<: *srht-service
-    build:
-      target: srht-todo
-    depends_on:
-      - redis
-      - postgres
-    develop:
-      watch:
-        - path: todo.sr.ht/api
-          action: rebuild
-    ports:
-      - "127.0.0.1:5103:5103"
-    command: /src/todo.sr.ht/api/api
-  todo:
-    <<: *srht-service
-    build:
-      target: srht-todo
-    develop:
-      watch:
-        - path: todo.sr.ht/todosrht
-          action: sync
-          target: /src/todo.sr.ht/todosrht
-    depends_on:
-      - redis
-      - postgres
-      - todo-api
-      - meta
-    ports:
-      - "127.0.0.1:5003:5003"
-    command: flask --app todosrht.app:app --debug run --host=0.0.0.0 --port=5003
-  todo-smtp:
-    <<: *srht-service
-    build:
-      target: srht-todo
-    develop:
-      watch:
-        - path: todo.sr.ht/todosrht-lmtp
-          action: rebuild
-        - path: todo.sr.ht/todosrht
-          action: rebuild
-    depends_on:
-      - redis
-      - postgres
-      - todo-api
-    ports:
-      - "127.0.0.1:5903:5903"
-    command: /src/todo.sr.ht/todosrht-lmtp
-  git-api:
-    <<: *srht-service
-    build:
-      target: srht-git
-    user: git
-    depends_on:
-      - redis
-      - postgres
-      - minio
-    volumes:
-      - "git-repos:/var/lib/git"
-    develop:
-      watch:
-        - path: git.sr.ht/api
-          action: rebuild
-    ports:
-      - "127.0.0.1:5101:5101"
-    command: /src/git.sr.ht/api/api
-  git:
-    <<: *srht-service
-    build:
-      target: srht-git
-    user: git
-    volumes:
-      - "git-repos:/var/lib/git"
-    develop:
-      watch:
-        - path: git.sr.ht/gitsrht
-          action: sync
-          target: /src/git.sr.ht/gitsrht
-        - path: scm.sr.ht/scmsrht
-          action: sync
-          target: /src/scm.sr.ht/scmsrht
-    depends_on:
-      - redis
-      - postgres
-      - minio
-      - git-api
-      - meta
-    ports:
-      - "127.0.0.1:5001:5001"
-    command: flask --app gitsrht.app:app --debug run --host=0.0.0.0 --port=5001
-  git-ssh:
-    build:
-      target: srht-git
-    volumes:
-      - "git-repos:/var/lib/git"
-    configs:
-      - source: main
-        target: /etc/sr.ht/config.ini
-      - source: git-sshd
-        target: /etc/ssh/sshd_config
-      - source: git-sshd-rsa-pubkey
-        target: /etc/ssh/ssh_host_rsa_key.pub
-      - source: git-sshd-rsa-privkey
-        target: /etc/ssh/ssh_host_rsa_key
-      - source: git-sshd-ed25519-pubkey
-        target: /etc/ssh/ssh_host_ed25519_key.pub
-      - source: git-sshd-ed25519-privkey
-        target: /etc/ssh/ssh_host_ed25519_key
-    develop:
-      watch:
-        - path: git.sr.ht # TODO: narrow down scope
-          action: rebuild
-    ports:
-      - "127.0.0.1:5901:22"
-    command: /usr/sbin/sshd -D -e
-  man-api:
-    <<: *srht-service
-    build:
-      target: srht-man
-    depends_on:
-      - redis
-      - postgres
-      - git
-    develop:
-      watch:
-        - path: man.sr.ht/api
-          action: rebuild
-    ports:
-      - "127.0.0.1:5104:5104"
-    command: /src/man.sr.ht/api/api
-  man:
-    <<: *srht-service
-    build:
-      target: srht-man
-    develop:
-      watch:
-        - path: man.sr.ht/mansrht
-          action: sync
-          target: /src/man.sr.ht/mansrht
-    depends_on:
-      - redis
-      - postgres
-      - man-api
-      - meta
-    ports:
-      - "127.0.0.1:5004:5004"
-    command: flask --app mansrht.app:app --debug run --host=0.0.0.0 --port=5004
-  paste-api:
-    <<: *srht-service
-    build:
-      target: srht-paste
-    depends_on:
-      - redis
-      - postgres
-    develop:
-      watch:
-        - path: paste.sr.ht/api
-          action: rebuild
-    ports:
-      - "127.0.0.1:5111:5111"
-    command: /src/paste.sr.ht/api/api
-  paste:
-    <<: *srht-service
-    build:
-      target: srht-paste
-    develop:
-      watch:
-        - path: paste.sr.ht/pastesrht
-          action: sync
-          target: /src/paste.sr.ht/pastesrht
-    depends_on:
-      - redis
-      - postgres
-      - paste-api
-      - meta
-    ports:
-      - "127.0.0.1:5011:5011"
-    command: flask --app pastesrht.app:app --debug run --host=0.0.0.0 --port=5011
+  hg-repos:
+  pages-certs:
+  ssh-hostkeys:

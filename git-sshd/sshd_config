@@ -1,4 +1,0 @@
-AuthorizedKeysCommand=/src/git.sr.ht/gitsrht-dispatch/gitsrht-dispatch "%u" "%h" "%t" "%k"
-AuthorizedKeysCommandUser=root
-PermitUserEnvironment SRHT_*
-PasswordAuthentication no

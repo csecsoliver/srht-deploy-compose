@@ -1,0 +1,4 @@
+*/20 * * * * su-exec git /usr/bin/git.sr.ht-periodic
+15 2 * * * su-exec meta /usr/bin/meta.sr.ht-daily
+30 2 * * * su-exec pages /usr/bin/pages.sr.ht-daily
+45 2 * * * su-exec hg /usr/bin/hg.sr.ht-clonebundles

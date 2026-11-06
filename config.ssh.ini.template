@@ -1,0 +1,36 @@
+# Restricted settings used by the forced Git and Mercurial SSH commands.
+# Keep this file separate from the full application configuration.
+[sr.ht]
+owner-name={{OWNER_NAME}}
+owner-email={{OWNER_EMAIL}}
+service-key={{SERVICE_KEY}}
+network-key={{NETWORK_KEY}}
+
+[webhooks]
+private-key={{WEBHOOK_PRIVATE_KEY}}
+
+[meta.sr.ht]
+origin=https://meta.{{DOMAIN}}
+api-origin=https://meta.{{DOMAIN}}
+api-internal-origin=http://meta-api:5100
+
+[git.sr.ht]
+origin=https://git.{{DOMAIN}}
+api-origin=https://git.{{DOMAIN}}
+api-internal-origin=http://git-api:5101
+connection-string=postgresql://git:{{DB_GIT_PASSWORD}}@postgres/git.sr.ht?sslmode=disable
+repos=/var/lib/git/
+shell=/usr/bin/git.sr.ht-shell
+ssh-user=git
+enable-dispatch=yes
+
+[hg.sr.ht]
+origin=https://hg.{{DOMAIN}}
+internal-origin=http://hg:5010
+api-origin=https://hg.{{DOMAIN}}
+api-internal-origin=http://hg-api:5110
+connection-string=postgresql://hg:{{DB_HG_PASSWORD}}@postgres/hg.sr.ht?sslmode=disable
+repos=/var/lib/mercurial/
+shell=/usr/bin/hg.sr.ht-shell
+ssh-user=hg
+enable-dispatch=yes

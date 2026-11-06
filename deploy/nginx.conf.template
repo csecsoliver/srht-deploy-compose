@@ -1,0 +1,133 @@
+server {
+    listen 80 default_server;
+    server_name {{DOMAIN}} *.{{DOMAIN}};
+    return 308 https://$host$request_uri;
+}
+
+server {
+    listen 80;
+    server_name _;
+    return 444;
+}
+
+server {
+    listen 443 ssl default_server;
+    http2 on;
+    server_name {{DOMAIN}};
+    ssl_certificate /etc/nginx/certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;
+    return 302 https://meta.{{DOMAIN}}$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name meta.{{DOMAIN}};
+    ssl_certificate /etc/nginx/certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;
+    client_max_body_size 32m;
+    location = /query { proxy_pass http://meta-api:5100; include /etc/nginx/proxy_params; }
+    location / { proxy_pass http://meta:5000; include /etc/nginx/proxy_params; }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name git.{{DOMAIN}};
+    ssl_certificate /etc/nginx/certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;
+    client_max_body_size 1g;
+    location = /query { proxy_pass http://git-api:5101; include /etc/nginx/proxy_params; }
+    location ~ ^/([^/]+)/([^/]+)/(HEAD|info/refs|objects/info/.*|git-upload-pack|git-upload-archive).*$ {
+        root /var/lib/git;
+        fastcgi_pass git-http:9000;
+        fastcgi_param SCRIPT_FILENAME /usr/bin/git.sr.ht-http-clone;
+        fastcgi_param PATH_INFO $uri;
+        fastcgi_param GIT_PROJECT_ROOT $document_root;
+        fastcgi_read_timeout 500s;
+        fastcgi_max_temp_file_size 512m;
+        include fastcgi_params;
+        gzip off;
+    }
+    location / { proxy_pass http://git:5001; include /etc/nginx/proxy_params; }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name hg.{{DOMAIN}};
+    ssl_certificate /etc/nginx/certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;
+    client_max_body_size 1g;
+    location = /query { proxy_pass http://hg-api:5110; include /etc/nginx/proxy_params; }
+    location = /authorize {
+        internal;
+        proxy_pass http://hg:5010/authorize;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header X-Original-URI $request_uri;
+        include /etc/nginx/proxy_params;
+    }
+    location ~ ^/[~^][a-z0-9_]+/[a-zA-Z0-9_.-]+/\.hg/bundles/.*$ {
+        root /var/lib/mercurial;
+    }
+    location ~ ^/[~^][a-z0-9_]+/[a-zA-Z0-9_.-]+/\.hg.*$ {
+        auth_request /authorize;
+        root /var/lib/mercurial;
+    }
+    location / { proxy_pass http://hg:5010; include /etc/nginx/proxy_params; }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name todo.{{DOMAIN}};
+    ssl_certificate /etc/nginx/certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;
+    client_max_body_size 32m;
+    location = /query { proxy_pass http://todo-api:5103; include /etc/nginx/proxy_params; }
+    location / { proxy_pass http://todo:5003; include /etc/nginx/proxy_params; }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name man.{{DOMAIN}};
+    ssl_certificate /etc/nginx/certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;
+    client_max_body_size 32m;
+    location = /query { proxy_pass http://man-api:5104; include /etc/nginx/proxy_params; }
+    location / { proxy_pass http://man:5004; include /etc/nginx/proxy_params; }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name paste.{{DOMAIN}};
+    ssl_certificate /etc/nginx/certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;
+    client_max_body_size 32m;
+    location = /query { proxy_pass http://paste-api:5111; include /etc/nginx/proxy_params; }
+    location / { proxy_pass http://paste:5011; include /etc/nginx/proxy_params; }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name pages.{{DOMAIN}} *.sites.{{DOMAIN}};
+    ssl_certificate /etc/nginx/certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;
+    client_max_body_size 1100m;
+    location / { proxy_pass http://pages:5112; include /etc/nginx/proxy_params; proxy_read_timeout 600s; }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name hub.{{DOMAIN}};
+    ssl_certificate /etc/nginx/certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;
+    client_max_body_size 32m;
+    location = /query { proxy_pass http://hub-api:5114; include /etc/nginx/proxy_params; }
+    location / { proxy_pass http://hub:5014; include /etc/nginx/proxy_params; }
+}
